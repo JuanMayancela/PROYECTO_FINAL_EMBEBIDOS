@@ -1,0 +1,167 @@
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <math.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_RESET -1
+#define SCREEN_ADDRESS 0x3C
+
+#define POT_PIN 34
+#define SIGNAL_PIN 35
+#define BUTTON_PIN 32
+
+#define NUM_POINTS 128
+
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+
+int signalValues[NUM_POINTS];
+#define SINE_WAVE 1
+#define SQUARE_WAVE 2
+int signalType = SINE_WAVE;
+
+const char* ssid = "Claro_Claro_exemmm";
+const char* password = "0986536986";
+const char* ubidotsToken = "BBUS-KhhcuzHLA8vqnsSjr1EqHpg9hlDNOJ";
+const char* ubidotsDeviceLabel = "esp32";
+const char* ubidotsVariableLabel = "signal_data";
+
+void connectToWiFi() {
+    Serial.print("Connecting to ");
+    Serial.println(ssid);
+    WiFi.begin(ssid, password);
+    while (WiFi.status() != WL_CONNECTED) {
+        delay(500);
+        Serial.print(".");
+    }
+    Serial.println("\nConnected!");
+}
+
+int generateSignal() {
+    static float angle = 0;
+    switch (signalType) {
+        case SINE_WAVE:
+            angle += 0.1;
+            if (angle >= 2 * PI) angle = 0;
+            return (int)(2047 * (sin(angle) + 1));
+        case SQUARE_WAVE:
+            angle += 0.1;
+            if (angle >= 2 * PI) angle = 0;
+            return angle < PI ? 4095 : 0;
+        default:
+            return 0;
+    }
+}
+
+void sendSignalDataToUbidots(void *parameter) {
+    while (true) {
+        if (WiFi.status() == WL_CONNECTED) {
+            HTTPClient http;
+            String url = String("http://industrial.api.ubidots.com/api/v1.6/devices/") + ubidotsDeviceLabel + "/";
+            http.begin(url);
+            http.addHeader("Content-Type", "application/json");
+            http.addHeader("X-Auth-Token", ubidotsToken);
+
+            String payload = "{";
+            payload += "\"" + String(ubidotsVariableLabel) + "\": [";
+            for (int i = 0; i < NUM_POINTS; i++) {
+                payload += String(signalValues[i]);
+                if (i < NUM_POINTS - 1) payload += ",";
+            }
+            payload += "]}";
+
+            int httpResponseCode = http.POST(payload);
+            if (httpResponseCode > 0) {
+                String response = http.getString();
+                Serial.println("HTTP Response code: " + String(httpResponseCode));
+                Serial.println("Response: " + response);
+            } else {
+                Serial.println("Error code: " + String(httpResponseCode));
+            }
+            http.end();
+        } else {
+            Serial.println("Error in WiFi connection");
+        }
+        vTaskDelay(10000 / portTICK_PERIOD_MS); // Delay 10 seconds
+    }
+}
+
+void displaySignal(void *parameter) {
+    while (true) {
+        int signalValue = generateSignal();
+
+        for (int i = 0; i < NUM_POINTS - 1; i++) {
+            signalValues[i] = signalValues[i + 1];
+        }
+        signalValues[NUM_POINTS - 1] = signalValue;
+
+        display.clearDisplay();
+        display.drawLine(0, display.height() / 2, display.width(), display.height() / 2, SSD1306_WHITE);
+        display.drawLine(display.width() / 2, 0, display.width() / 2, display.height(), SSD1306_WHITE);
+
+        for (int i = 0; i < display.width(); i += 20) {
+            display.setCursor(i, display.height() / 2 + 5);
+            display.print(map(i, 0, display.width(), 0, NUM_POINTS));
+        }
+
+        for (int i = 0; i < display.height(); i += 20) {
+            display.setCursor(display.width() / 2 + 5, i);
+            display.print(map(i, display.height(), 0, 0, 4095));
+        }
+
+        for (int i = 0; i < NUM_POINTS - 1; i++) {
+            int y1 = map(signalValues[i], 0, 4095, display.height(), 0);
+            int y2 = map(signalValues[i + 1], 0, 4095, display.height(), 0);
+            display.drawLine(i, y1, i + 1, y2, SSD1306_WHITE);
+        }
+
+        display.display();
+        vTaskDelay(100 / portTICK_PERIOD_MS); // Delay to prevent overloading
+    }
+}
+
+void handleButton(void *parameter) {
+    while (true) {
+        int buttonState = digitalRead(BUTTON_PIN);
+        if (buttonState == LOW) {
+            delay(50);
+            if (digitalRead(BUTTON_PIN) == LOW) {
+                signalType = (signalType == SINE_WAVE) ? SQUARE_WAVE : SINE_WAVE;
+                while (digitalRead(BUTTON_PIN) == LOW) {
+                    delay(10);
+                }
+            }
+        }
+        vTaskDelay(10 / portTICK_PERIOD_MS); // Short delay for button handling
+    }
+}
+
+void setup() {
+    pinMode(BUTTON_PIN, INPUT_PULLUP);
+    Serial.begin(115200);
+    connectToWiFi();
+
+    if (!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
+        Serial.println(F("SSD1306 allocation failed"));
+        for (;;);
+    }
+    delay(2000);
+
+    for (int i = 0; i < NUM_POINTS; i++) {
+        signalValues[i] = 0;
+    }
+
+    xTaskCreate(sendSignalDataToUbidots, "UbidotsTask", 4096, NULL, 1, NULL);
+    xTaskCreate(displaySignal, "DisplayTask", 4096, NULL, 1, NULL);
+    xTaskCreate(handleButton, "ButtonTask", 2048, NULL, 1, NULL);
+}
+
+void loop() {
+    // The loop function is empty since tasks handle the functionality
+    vTaskDelay(portMAX_DELAY); // Keep the loop task suspended
+}

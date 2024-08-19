@@ -1,0 +1,82 @@
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <driver/dac.h>
+#include <math.h>
+
+#define SCREEN_WIDTH 128 // OLED display width, in pixels
+#define SCREEN_HEIGHT 64 // OLED display height, in pixels
+#define OLED_RESET -1    // Reset pin # (or -1 if sharing Arduino reset pin)
+#define SCREEN_ADDRESS 0x3C // Address 0x3C for 128x64
+
+#define DAC_CHANNEL DAC_CHANNEL_1 // Usa DAC_CHANNEL_1 (GPIO25) o DAC_CHANNEL_2 (GPIO26)
+#define SAMPLE_RATE 10000 // Frecuencia de muestreo en Hz
+#define FREQUENCY 1000 // Frecuencia de la señal en Hz
+#define AMPLITUDE 255 // Amplitud máxima de la señal (0-255)
+#define OFFSET 128 // Offset para centrar la señal en el rango de DAC
+
+#define NUM_POINTS 128 // Número de puntos para mostrar en la pantalla OLED
+
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+
+void generateSignal(void *pvParameters);
+
+void setup() {
+  Serial.begin(115200);
+  
+  // Configura el DAC
+  dac_output_enable(DAC_CHANNEL);
+
+  // Configura la pantalla OLED
+  if (!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
+    Serial.println(F("No se pudo encontrar una pantalla SSD1306"));
+    for (;;);
+  }
+  display.clearDisplay();
+  
+  // Crea una tarea para el generador de funciones
+  xTaskCreate(generateSignal, "GenerateSignal", 2048, NULL, 1, NULL);
+}
+
+void loop() {
+  // El loop principal puede estar vacío si todo se maneja en la tarea
+}
+
+void generateSignal(void *pvParameters) {
+  float phase = 0.0;
+  float phaseIncrement = 2 * M_PI * FREQUENCY / SAMPLE_RATE;
+  
+  int signalBuffer[NUM_POINTS] = {0};
+  int index = 0;
+
+  while (true) {
+    // Calcula el valor de la onda senoidal
+    int value = (int)(AMPLITUDE * sin(phase) + OFFSET);
+    dac_output_voltage(DAC_CHANNEL, value);
+    
+    // Almacena el valor en el buffer
+    signalBuffer[index] = value;
+    index = (index + 1) % NUM_POINTS;
+
+    // Muestra la forma de onda en la pantalla OLED
+    display.clearDisplay();
+    display.drawLine(0, SCREEN_HEIGHT / 2, NUM_POINTS, SCREEN_HEIGHT / 2, SSD1306_WHITE); // Línea base
+    for (int i = 0; i < NUM_POINTS - 1; i++) {
+      int x1 = map(i, 0, NUM_POINTS - 1, 0, SCREEN_WIDTH - 1);
+      int y1 = map(signalBuffer[i], 0, 255, SCREEN_HEIGHT - 1, 0);
+      int x2 = map(i + 1, 0, NUM_POINTS - 1, 0, SCREEN_WIDTH - 1);
+      int y2 = map(signalBuffer[i + 1], 0, 255, SCREEN_HEIGHT - 1, 0);
+      display.drawLine(x1, y1, x2, y2, SSD1306_WHITE);
+    }
+    display.display();
+    
+    // Avanza la fase
+    phase += phaseIncrement;
+    if (phase > 2 * M_PI) {
+      phase -= 2 * M_PI;
+    }
+
+    // Espera el intervalo entre muestras
+    delayMicroseconds(1000000 / SAMPLE_RATE);
+  }
+}
